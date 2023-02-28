@@ -15,11 +15,10 @@
 
 registerMooseAction("PhaseFieldApp", GrandPotentialKernelAction, "add_kernel");
 
-template <>
 InputParameters
-validParams<GrandPotentialKernelAction>()
+GrandPotentialKernelAction::validParams()
 {
-  InputParameters parameters = validParams<Action>();
+  InputParameters parameters = Action::validParams();
   parameters.addClassDescription(
       "Automatically generate most or all of the kernels for the grand potential model");
   parameters.addRequiredParam<std::vector<NonlinearVariableName>>(
@@ -72,15 +71,11 @@ validParams<GrandPotentialKernelAction>()
   parameters.addParam<std::vector<NonlinearVariableName>>(
       "concentrations", "List of concentration variables for strict mass conservation");
   parameters.addParam<std::vector<MaterialPropertyName>>(
-      "body_forces", "List of body forces coefficients for strict mass conservation formulation."
+      "h_c_min", "List of body forces coefficients for strict mass conservation formulation that indicates the minima in concentration free energy."
                      "Place in same order as switching_function_names.");
   parameters.addParam<std::vector<MaterialPropertyName>>(
-      "mat_reacts", "List of mat react coefficients for strict mass conservation formulation."
+      "h_over_kVa", "List of mat react coefficients for strict mass conservation formulation that ."
                      "Place in same order as switching_function_names.");
-  parameters.addParam<MaterialPropertyName>(
-      "mobility_cw", "Lcw", "Name of mobility to be used with concentration-chempot coupling."
-                            "Automatically created with strict mass conservation GrandPotentialSinteringMaterial.");
-
   return parameters;
 }
 
@@ -112,22 +107,27 @@ GrandPotentialKernelAction::act()
   auto implicity = getParam<bool>("implicit");
   auto displaced_mesh = getParam<bool>("use_displaced_mesh");
   auto aniso = getParam<MultiMooseEnum>("anisotropic");
-  const auto c_names = getParam<std::vector<NonlinearVariableName>>("concentrations");
-  const auto MRj = getParam<std::vector<MaterialPropertyName>>("mat_reacts");
-  const auto BFj = getParam<std::vector<MaterialPropertyName>>("body_forces");
-  const auto mob_cw = getParam<MaterialPropertyName>("mobility_cw");
+  const auto hj_over_kVa = getParam<std::vector<MaterialPropertyName>>("h_over_kVa");
+  const auto hj_c_min = getParam<std::vector<MaterialPropertyName>>("h_c_min");
   auto mass_conservation = getParam<bool>("mass_conservation");
 
   // Size definitions and checks
   unsigned int n_w = w_names.size();
   unsigned int n_hj = hj.size();
   std::vector<NonlinearVariableName> etas;
+  std::vector<NonlinearVariableName> c_names;
+  unsigned int n_c = 0;
   unsigned int n_etas = 0;
   std::string kernel_name;
   if (isParamValid("additional_ops"))
   {
     etas = getParam<std::vector<NonlinearVariableName>>("additional_ops");
     n_etas = etas.size();
+  }
+  if (isParamValid("concentrations"))
+  {
+    c_names = getParam<std::vector<NonlinearVariableName>>("concentrations");
+    n_c = c_names.size()
   }
 
   if (chis.size() != n_w)
@@ -260,7 +260,7 @@ GrandPotentialKernelAction::act()
     params.set<std::vector<MaterialPropertyName>>("gamma_names") = gam;
     kernel_name = "AcGrGr_" + var_name;
     _problem->addKernel("ACGrGrMulti", kernel_name, params);
-  } // for (unsigned int i = 0; i < n_etas + n_grs; ++i)
+  }
 
   switch (mass_conservation)
   {
@@ -278,7 +278,7 @@ GrandPotentialKernelAction::act()
       params.set<bool>("use_displaced_mesh") = displaced_mesh;
       kernel_name = "ChiDt_" + w_names[i];
       _problem->addKernel("SusceptibilityTimeDerivative", kernel_name, params);
-     
+
       // MatDiffusion
       params = _factory.getValidParams("MatDiffusion");
       params.set<NonlinearVariableName>("variable") = w_names[i];
@@ -293,7 +293,7 @@ GrandPotentialKernelAction::act()
         params.set<std::vector<VariableName>>("args") = v0;
         _problem->addKernel("MatDiffusion", kernel_name, params);
       }
-     
+
       // CoupledSwitchingTimeDerivative
       for (unsigned int j = 0; j < n_hj; ++j)
         fj_temp[j] = Fj_w[i * n_hj + j];
@@ -310,9 +310,9 @@ GrandPotentialKernelAction::act()
         params.set<bool>("use_displaced_mesh") = displaced_mesh;
         kernel_name = "Coupled_" + w_names[i] + "_" + all_etas[j];
         _problem->addKernel("CoupledSwitchingTimeDerivative", kernel_name, params);
-      } //     for (unsigned int j = 0; j < n_etas + n_grs; ++j) coupledSwitchingTimeDeriv
-    } //for (unsigned int i = 0; i < n_w; ++i) chempot
-    } // case false
+      }
+    }
+    }
     case true: // mass conservation kernels with conc and chempot coupling
     {
       std::vector<VariableName> v3;
@@ -333,7 +333,7 @@ GrandPotentialKernelAction::act()
         params.set<bool>("use_displaced_mesh") = displaced_mesh;
         kernel_name = "DT_" + c_names[i];
         _problem->addKernel("TimeDerivative", kernel_name, params);
-     
+
         // MatDiffusion concentration (coupled with chempot)
         params = _factory.getValidParams("MatDiffusion");
         params.set<NonlinearVariableName>("variable") = c_names[i];
@@ -349,11 +349,11 @@ GrandPotentialKernelAction::act()
         }
         else
         {
-           params.set<std::vector<VariableName>>("args") = v0;
-           _problem->addKernel("MatDiffusion", kernel_name, params);
+          params.set<std::vector<VariableName>>("args") = v0;
+          _problem->addKernel("MatDiffusion", kernel_name, params);
         }
-      } // for (unsigned int i = 0; i < n_c; ++i)
-      
+      }
+
       // Chemical Potentials
       for (unsigned int i = 0; i < n_w; ++i)
       {
@@ -361,37 +361,37 @@ GrandPotentialKernelAction::act()
         InputParameters params = _factory.getValidParams("MatReaction");
         params.set<NonlinearVariableName>("variable") = w_names[i];
         params.set<std::vector<VariableName>>("v") = v4;
-        params.set<MaterialPropertyName>("mob_name") = mob_cw;
+        params.set<MaterialPropertyName>("mob_name") = "-1";
         kernel_name = "MR_c" + w_names[i];
         _problem->addKernel("MatReaction", kernel_name, params);
-         
+
         // contribution between chempot and each grains to concentration
         // Summations of MatReaction and MaskedBodyForce
-         
+
         for (unsigned int j = 0; j < n_hj; ++j)
         {
           // MatReaction
           params = _factory.getValidParams("MatReaction");
           params.set<NonlinearVariableName>("variable") = w_names[i];
           params.set<std::vector<VariableName>>("args") = v1;
-          params.set<MaterialPropertyName>("mob_name") = MRj[j];
+          params.set<MaterialPropertyName>("mob_name") = hj_over_kVa[j];
           params.set<std::vector<VariableName>>("args") = v1;
           params.set<bool>("implicit") = implicity;
           params.set<bool>("use_displaced_mesh") = displaced_mesh;
           kernel_name = "MR_" + w_names[i] + "_" + all_etas[j];
           _problem->addKernel("MatReaction", kernel_name, params);
-          
+
           //MaskedBodyForce
           params = _factory.getValidParams("MaskedBodyForce");
           params.set<NonlinearVariableName>("variable") = w_names[i];
           params.set<std::vector<VariableName>>("args") = v1;
-          params.set<MaterialPropertyName>("mask") = BFj[j];
+          params.set<MaterialPropertyName>("mask") = hj_c_min[j];
           params.set<bool>("implicit") = implicity;
           params.set<bool>("use_displaced_mesh") = displaced_mesh;
           kernel_name = "MBD_" + w_names[i] + "_" + all_etas[j];
           _problem->addKernel("MaskedBodyForce", kernel_name, params);
         }
-      } // for (unsigned int i = 0; i < n_w; ++i)
-    } // case true
-  } // switch
+      }
+    }
+  }
 } // GrandPotentialKernelAction::act()
